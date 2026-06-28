@@ -124,6 +124,15 @@ single decoupled RoPE key $\mathbf{k}^{R}\!\in\!\mathbb{R}^{d_\text{rope}}$
 ($d_\text{rope}=16$), shared across heads&mdash;so its cache width is
 $d_c + d_\text{rope}$ regardless of head count.
 </p>
+<figure>
+  <img src="figures/attention_variants.svg" alt="How MHA, GQA, MLA, and MQA each produce and cache keys and values">
+  <figcaption><strong>Figure 1.</strong> What each variant stores per token. MHA keeps a full
+  key and value for every head; GQA shares them across $g$ groups; MQA collapses to a single
+  shared KV head. MLA instead caches a compressed latent $\mathbf{c}^{KV}$ ($d_c{=}256$) plus one
+  decoupled RoPE key ($d_\text{rope}{=}16$) and reconstructs the per-head keys/values only at
+  compute time — a small cache without giving up head diversity. Widths are drawn to the same
+  per-head scale.</figcaption>
+</figure>
 
 <h2>3&nbsp;&nbsp;Multi-head Latent Attention</h2>
 <p>
@@ -182,6 +191,14 @@ $<\!10^{-9}$, and use it for every MLA decode measurement below.
     full forward pass to $10^{-9}$ for every variant; causality (no future leak)
     is asserted; MLA's absorbed path is checked against its naive path.</li>
 </ul>
+<figure>
+  <img src="figures/arch_backbone.svg" alt="GPT backbone: token embedding, twelve pre-norm transformer blocks with a swappable attention module and SwiGLU MLP, final norm, tied LM head">
+  <figcaption><strong>Figure 2.</strong> The fixed backbone. Only the shaded <em>Attention</em>
+  module is swapped between MHA, MQA, GQA, and MLA — token/position handling, RMSNorm, the
+  SwiGLU MLP, RoPE, weight tying, and every dimension are held constant, so the attention
+  mechanism is the sole independent variable. Each block applies pre-norm residuals,
+  $x \leftarrow x + \text{Sublayer}(\text{RMSNorm}(x))$.</figcaption>
+</figure>
 
 <h2>5&nbsp;&nbsp;Efficiency results</h2>
 <p class="small">
@@ -199,7 +216,7 @@ caching a single shared latent rather than four KV groups.
 </p>
 <figure>
   <img src="figures/kv_cache_vs_context.png" alt="KV cache vs context length, log-log">
-  <figcaption><strong>Figure 1.</strong> KV-cache footprint vs context length
+  <figcaption><strong>Figure 3.</strong> KV-cache footprint vs context length
   (log-log). The ordering MHA &gt; GQA &gt; MLA &gt; MQA is fixed by the cached
   width and independent of hardware.</figcaption>
 </figure>
@@ -227,12 +244,12 @@ fraction of their memory.
 </table>
 <figure>
   <img src="figures/decode_throughput_vs_context.png" alt="Decode throughput vs context">
-  <figcaption><strong>Figure 2.</strong> Decode throughput vs context. MLA's curve
+  <figcaption><strong>Figure 4.</strong> Decode throughput vs context. MLA's curve
   is flat-then-gentle: it crosses above MHA and GQA as context grows.</figcaption>
 </figure>
 <figure>
   <img src="figures/decode_mem_vs_context.png" alt="Decode peak memory vs context">
-  <figcaption><strong>Figure 3.</strong> Decode-step peak memory. MLA tracks far
+  <figcaption><strong>Figure 5.</strong> Decode-step peak memory. MLA tracks far
   below MHA/GQA and approaches MQA.</figcaption>
 </figure>
 
@@ -245,7 +262,7 @@ inference-time win, not a training-time cost.
 </p>
 <figure>
   <img src="figures/throughput_bars.png" alt="Prefill and training throughput bars">
-  <figcaption><strong>Figure 4.</strong> Prefill (left) and training-step (right)
+  <figcaption><strong>Figure 6.</strong> Prefill (left) and training-step (right)
   throughput. The attention variant barely moves the compute-bound regime.</figcaption>
 </figure>
 
@@ -282,7 +299,7 @@ masks it. We do not over-read the ordering among the three cheap variants here.
 </p>
 <figure>
   <img src="figures/quality_vs_kv.png" alt="Quality vs KV-cache footprint">
-  <figcaption><strong>Figure 5.</strong> Quality (val perplexity) against KV-cache
+  <figcaption><strong>Figure 7.</strong> Quality (val perplexity) against KV-cache
   width per token. The near-flat spread shows the efficiency axis is nearly free
   of quality cost at dev scale; MLA sits in the low-cache band beside MQA/GQA.</figcaption>
 </figure>

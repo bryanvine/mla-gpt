@@ -18,6 +18,14 @@ At a 128k-token context (batch 8) the 124M MHA model needs **38.6 GB** of KV cac
 more than 2× this GPU. The attention mechanism decides whether long context is
 feasible at all on commodity hardware.
 
+## Architecture
+
+One fixed backbone trains every variant — only the shaded **Attention** module changes.
+Token/position handling, RMSNorm, the SwiGLU MLP, RoPE, weight tying, and every dimension
+are held constant, so the attention mechanism is the sole independent variable.
+
+![GPT backbone: token embedding, twelve pre-norm transformer blocks with a swappable attention module and SwiGLU MLP, final RMSNorm, and a tied LM head](docs/figures/arch_backbone.svg)
+
 ## Attention variants
 
 | Variant | KV heads | KV cache / token / layer | Notes |
@@ -26,6 +34,12 @@ feasible at all on commodity hardware.
 | MQA | 1 | `2 · d_head` | Single shared KV head |
 | GQA | `n_kv_head` | `2 · n_kv_head · d_head` | Grouped KV heads |
 | MLA | latent | `d_c + d_rope` | Low-rank KV compression + decoupled RoPE (DeepSeek-V2) |
+
+Each variant changes only how K/V are cached. MHA/GQA/MQA shrink the cache by
+sharing KV heads; MLA instead caches a small latent and reconstructs full
+per-head K/V on read (numbers are per-layer cache elements at the 124M config).
+
+![How MHA, GQA, MLA, and MQA cache K and V — head-sharing vs. low-rank latent compression](docs/figures/attention_variants.svg)
 
 ## Efficiency results (124M, RTX 4080 Super, bf16)
 
