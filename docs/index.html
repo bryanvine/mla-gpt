@@ -67,8 +67,9 @@ throughput, and maximum attainable context) and quality (validation perplexity,
 bits-per-byte). MLA compresses the KV cache <span class="win">5.6&times;</span>
 relative to MHA while keeping per-token decode memory close to MQA, and&mdash;via
 weight absorption&mdash;delivers decode throughput that <em>overtakes</em> MHA
-and GQA at long context. Quality results from the controlled sweeps are reported
-in &sect;6.
+and GQA at long context. On the dev-scale quality sweep (&sect;6.1) the four
+variants fall within ~2.4% perplexity of one another, so the cache savings come
+at negligible quality cost; the 124M headline sweep (&sect;6.2) is pending.
 </p>
 </div>
 
@@ -250,21 +251,41 @@ inference-time win, not a training-time cost.
 
 <h2>6&nbsp;&nbsp;Quality results</h2>
 <div class="note">
-<strong>In progress.</strong> Quality numbers are produced by controlled training
-sweeps with the attention variant as the only difference. The TinyStories dev
-sweep (≈50M params) and the FineWeb-Edu headline sweep (124M, ~10B tokens) fill
-the tables below; this section is updated as each completes.
+Quality numbers are produced by controlled training sweeps with the attention
+variant as the <em>only</em> difference. The TinyStories dev sweep (&sect;6.1,
+≈50M params, 4k iters) is <strong>complete</strong>; the FineWeb-Edu headline
+sweep (&sect;6.2, 124M, ~10B tokens) is <strong>pending</strong>. Val loss is a
+deterministic non-overlapping sweep over the held-out split; bits/byte normalizes
+by raw UTF-8 bytes so it is comparable across tokenizers.
 </div>
 <h3>6.1&nbsp;&nbsp;TinyStories (dev scale, ~50M)</h3>
 <table>
 <thead><tr><th>Variant</th><th>Params</th><th>KV B/tok</th><th>Val loss</th><th>Perplexity</th><th>Bits/byte</th></tr></thead>
 <tbody>
-<tr><td>MHA</td><td>51.5M</td><td>16,384</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
-<tr><td>GQA</td><td>&mdash;</td><td>4,096</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
-<tr><td>MLA</td><td>&mdash;</td><td>2,304</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
-<tr><td>MQA</td><td>&mdash;</td><td>2,048</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
+<tr><td>MHA</td><td>51.5M</td><td>16,384 (1.0&times;)</td><td>1.4351</td><td>4.200</td><td>0.5134</td></tr>
+<tr><td>GQA</td><td>48.3M</td><td>4,096 (4.0&times;)</td><td>1.4550</td><td>4.284</td><td>0.5206</td></tr>
+<tr><td>MLA</td><td>48.8M</td><td>2,304 (7.1&times;)</td><td>1.4590</td><td>4.302</td><td>0.5220</td></tr>
+<tr><td>MQA</td><td>47.8M</td><td>2,048 (8.0&times;)</td><td>1.4488</td><td>4.258</td><td>0.5183</td></tr>
 </tbody>
 </table>
+<p>
+At dev scale the four variants land within <strong>0.024 val loss</strong>
+(0.10 perplexity, ~2.4%) of one another. MHA leads, as expected from the largest
+and most expressive cache; the three cache-reduced variants are separated by less
+than run-to-run noise (MQA 4.258, GQA 4.284, MLA 4.302). The practical reading is
+that cutting the KV cache <strong>4&ndash;8&times;</strong> costs essentially
+nothing in quality at this token budget. MLA matches the GQA/MQA quality band
+while&mdash;unlike them&mdash;reconstructing full per-head keys and values; whether
+that retained head diversity converts into a quality edge is a question for the
+124M/10B headline scale (&sect;6.2), where 50M/4k-iter under-training no longer
+masks it. We do not over-read the ordering among the three cheap variants here.
+</p>
+<figure>
+  <img src="figures/quality_vs_kv.png" alt="Quality vs KV-cache footprint">
+  <figcaption><strong>Figure 5.</strong> Quality (val perplexity) against KV-cache
+  width per token. The near-flat spread shows the efficiency axis is nearly free
+  of quality cost at dev scale; MLA sits in the low-cache band beside MQA/GQA.</figcaption>
+</figure>
 <h3>6.2&nbsp;&nbsp;FineWeb-Edu (headline, 124M)</h3>
 <table>
 <thead><tr><th>Variant</th><th>Params</th><th>KV B/tok</th><th>Val loss</th><th>Perplexity</th><th>Bits/byte</th></tr></thead>

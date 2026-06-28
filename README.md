@@ -38,7 +38,25 @@ feasible at all on commodity hardware.
 
 MLA compresses the cache **5.6×** vs MHA while reconstructing full per-head K/V
 (no head-sharing), and — via weight absorption — **overtakes MHA and GQA on decode
-throughput at long context**. Quality numbers (controlled sweeps) land in the paper.
+throughput at long context**.
+
+## Quality results (TinyStories dev sweep, ~50M, 4k iters)
+
+One shared config, only `--attn` changes. Val loss is a deterministic
+non-overlapping sweep over the held-out split; bits/byte normalizes by raw UTF-8
+bytes (tokenizer-independent).
+
+| Variant | Params | KV B/tok | Val loss | Perplexity | Bits/byte |
+|--------|-------:|---------:|---------:|-----------:|----------:|
+| MHA | 51.5M | 16,384 (1.0×) | 1.4351 | 4.200 | 0.5134 |
+| GQA | 48.3M | 4,096 (4.0×) | 1.4550 | 4.284 | 0.5206 |
+| MLA | 48.8M | 2,304 (7.1×) | 1.4590 | 4.302 | 0.5220 |
+| MQA | 47.8M | 2,048 (8.0×) | 1.4488 | 4.258 | 0.5183 |
+
+At dev scale all four land within **0.024 val loss (~2.4% perplexity)** — cutting
+the KV cache **4–8×** costs essentially nothing in quality. MLA matches the
+GQA/MQA band while keeping full per-head K/V. The 124M FineWeb-Edu headline sweep
+is pending; full numbers land in the [paper](https://bryanvine.github.io/mla-gpt/).
 
 ## Setup
 
