@@ -1,0 +1,39 @@
+# Dev config: ~50M GPT on TinyStories for fast end-to-end iteration.
+# Train all four variants by changing only --attn; everything else is held fixed.
+model:
+  attn_type: mha          # overridden by --attn
+  vocab_size: 50304
+  block_size: 512
+  n_layer: 8
+  n_head: 8
+  d_model: 512
+  mlp_hidden_mult: 2.6667
+  dropout: 0.0
+  tie_embeddings: true
+  rope_theta: 10000.0
+  # variant-specific (used only by the matching attn_type)
+  n_kv_head: 2            # GQA: 8 heads -> 2 groups (4x KV reduction)
+  kv_lora_rank: 128       # MLA: latent width (vs 2*512 MHA -> ~8x reduction)
+  q_lora_rank: 0
+  qk_nope_head_dim: 48
+  qk_rope_head_dim: 16
+  v_head_dim: 64
+
+train:
+  data_dir: data/tinystories
+  batch_size: 24
+  grad_accum: 4           # ~49k tokens/iter (full-vocab logits dominate 16GB memory)
+  max_iters: 4000
+  warmup_iters: 150
+  lr: 9.0e-4
+  min_lr: 9.0e-5
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 250
+  eval_iters: 80
+  log_interval: 25
+  seed: 1337
+  dtype: bfloat16
+  compile: true

@@ -1,0 +1,39 @@
+# Headline config: ~124M GPT (GPT-2 small shape) on FineWeb-Edu 10B.
+# Train all four variants by changing only --attn; everything else is held fixed.
+# batch_size is tuned for ~16 GB; lower it (raise grad_accum to compensate) if OOM.
+model:
+  attn_type: mha          # overridden by --attn
+  vocab_size: 50304
+  block_size: 1024
+  n_layer: 12
+  n_head: 12
+  d_model: 768
+  mlp_hidden_mult: 2.6667
+  dropout: 0.0
+  tie_embeddings: true
+  rope_theta: 10000.0
+  n_kv_head: 4            # GQA: 12 heads -> 4 groups (3x KV reduction)
+  kv_lora_rank: 256       # MLA: latent width (5.6x KV reduction vs MHA)
+  q_lora_rank: 0
+  qk_nope_head_dim: 48
+  qk_rope_head_dim: 16
+  v_head_dim: 64
+
+train:
+  data_dir: data/fineweb_edu_10b
+  batch_size: 24
+  grad_accum: 20          # ~0.5M tokens/iter (GPT-2 scale)
+  max_iters: 20000        # ~9.8B tokens
+  warmup_iters: 700
+  lr: 6.0e-4
+  min_lr: 6.0e-5
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 1000
+  eval_iters: 200
+  log_interval: 50
+  seed: 1337
+  dtype: bfloat16
+  compile: true

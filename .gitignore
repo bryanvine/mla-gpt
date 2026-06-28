@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Data & training artifacts (regenerated from scripts)
+data/
+*.bin
+*.idx
+checkpoints/
+runs/
+out/
+wandb/
+*.pt
+*.ckpt
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Paper build
+paper/_site/
+.jekyll-cache/
