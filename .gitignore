@@ -23,6 +23,9 @@ wandb/
 # OS
 .DS_Store
 
+# Local agent / editor
+.claude/
+
 # Paper build
 paper/_site/
 .jekyll-cache/

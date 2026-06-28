@@ -48,6 +48,7 @@ class TrainConfig:
     device: str = "cuda"
     dtype: str = "bfloat16"
     compile: bool = True
+    resume: bool = True     # auto-continue from out_dir/ckpt.pt if present
 
     @property
     def tokens_per_iter(self) -> int:
@@ -115,27 +116,45 @@ def run_training(model_cfg: GPTConfig, tc: TrainConfig) -> dict:
                     "kv_bytes_per_token": raw_model.kv_bytes_per_token(),
                     "tokens_per_iter": tokens_per_iter}, indent=2)
     )
+    # resume from a prior checkpoint in this out_dir, if present
+    best_val = float("inf")
+    start_iter = 0
+    ckpt_path = out_dir / "ckpt.pt"
+    if tc.resume and ckpt_path.exists():
+        ck = torch.load(ckpt_path, map_location=tc.device)
+        raw_model.load_state_dict(ck["model"])
+        optimizer.load_state_dict(ck["optimizer"])
+        scaler.load_state_dict(ck["scaler"])
+        start_iter = int(ck["iter"])
+        best_val = float(ck["best_val"])
+        torch.set_rng_state(ck["cpu_rng"].cpu())
+        if ck.get("cuda_rng") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([s.cpu() for s in ck["cuda_rng"]])
+        print(f"[resume] {tc.out_dir} continuing from iter {start_iter} (best_val {best_val:.4f})")
+
     metrics_path = out_dir / "metrics.csv"
-    metrics_file = metrics_path.open("w", newline="")
+    fresh = start_iter == 0 or not metrics_path.exists()
+    metrics_file = metrics_path.open("w" if fresh else "a", newline="")
     writer = csv.writer(metrics_file)
-    writer.writerow(["iter", "time_s", "lr", "train_loss", "val_loss", "tokens", "tok_per_s"])
+    if fresh:
+        writer.writerow(["iter", "time_s", "lr", "train_loss", "val_loss", "tokens", "tok_per_s"])
 
     print(f"[{tc.out_dir}] {model_cfg.attn_type.upper()} | params={raw_model.num_params():,} "
           f"| kv={raw_model.kv_bytes_per_token():,} B/tok | tok/iter={tokens_per_iter:,}")
 
-    best_val = float("inf")
-    t0 = time.time()
+    t0 = time.time()  # session start; on resume, metrics time_s/tok_per_s are per-session
     x, y = get_batch("train", tc.batch_size)
     running = None
-    for it in range(tc.max_iters + 1):
+    for it in range(start_iter, tc.max_iters + 1):
         lr = _lr_at(it, tc)
         for g in optimizer.param_groups:
             g["lr"] = lr
 
-        if it % tc.eval_interval == 0:
+        if it % tc.eval_interval == 0 and not (it == start_iter and start_iter > 0):
             losses = estimate_loss(model, get_batch, tc, ctx)
             dt = time.time() - t0
-            tps = (it * tokens_per_iter) / dt if it > 0 else 0.0
+            done = it - start_iter
+            tps = (done * tokens_per_iter) / dt if done > 0 else 0.0
             writer.writerow([it, f"{dt:.1f}", f"{lr:.2e}", f"{losses['train']:.4f}",
                              f"{losses['val']:.4f}", it * tokens_per_iter, f"{tps:.0f}"])
             metrics_file.flush()
@@ -145,6 +164,12 @@ def run_training(model_cfg: GPTConfig, tc: TrainConfig) -> dict:
                 best_val = min(best_val, losses["val"])
                 torch.save({"model": raw_model.state_dict(), "model_cfg": model_cfg.to_dict(),
                             "iter": it, "val_loss": losses["val"]}, out_dir / "best.pt")
+            # resume checkpoint (model + optimizer + RNG), overwritten each eval
+            torch.save({"model": raw_model.state_dict(), "optimizer": optimizer.state_dict(),
+                        "scaler": scaler.state_dict(), "iter": it, "best_val": best_val,
+                        "cpu_rng": torch.get_rng_state(),
+                        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                        "model_cfg": model_cfg.to_dict()}, ckpt_path)
 
         if it == tc.max_iters:
             break
