@@ -1,13 +1,13 @@
 #!/bin/bash
 # Headline 124M FineWeb-Edu sweep on PACE-ICE as a Slurm JOB ARRAY: one attention
-# variant per array task, each on a single H200. Independent 1-GPU jobs keep each
+# variant per array task, each on a single H100 or H200. Independent 1-GPU jobs keep each
 # job's GPU-minutes (1 x walltime) under the coc-ice QOS cap of 960 GPU-min/job;
 # the monolithic 4-GPU form (4 x 480 = 1920) is rejected as QOSMaxGRESMinutesPerJob.
-# The tasks schedule in parallel across 4 H200s, so wall-clock ~= one variant.
+# The tasks schedule in parallel across the H100/H200 pool, so wall-clock ~= one variant.
 #
 #   arr=$(sbatch --parsable scripts/sweep_fineweb_pace.sbatch)
 #   sbatch --dependency=afterok:$arr scripts/eval_fineweb_pace.sbatch
-#   ITERS=10000 BATCH=96 ACCUM=5 sbatch scripts/sweep_fineweb_pace.sbatch
+#   ITERS=10000 BATCH=80 ACCUM=6 sbatch scripts/sweep_fineweb_pace.sbatch
 #
 # Data and checkpoints live in scratch (home quota is small); runs/ is symlinked
 # to $HOME/scratch/mla_runs. tokens/iter = BATCH*ACCUM*1024 is held identical to
@@ -15,7 +15,10 @@
 #SBATCH -J mla_sweep
 #SBATCH -N 1
 #SBATCH -p ice-gpu
-#SBATCH --gres=gpu:h200:1
+# HX00 = "H100 or H200" (both carry that feature); widens the eligible-node pool so a
+# task starts on whichever frees first. H100=80GB, so batch=80 (peak ~63GB) fits both.
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=HX00
 #SBATCH -c 4
 #SBATCH --mem-per-cpu=8G
 #SBATCH -t 480
@@ -28,8 +31,8 @@ export PATH="$HOME/.local/bin:$PATH"
 CONFIG=configs/gpt2_124m_base.yaml
 DATA="${DATA:-$HOME/scratch/mla_data/fineweb_edu_10b}"
 ITERS="${ITERS:-20000}"
-BATCH="${BATCH:-96}"
-ACCUM="${ACCUM:-5}"
+BATCH="${BATCH:-80}"
+ACCUM="${ACCUM:-6}"
 VARIANTS=(mha gqa mqa mla)
 attn="${VARIANTS[$SLURM_ARRAY_TASK_ID]}"
 name="fineweb_${attn}"

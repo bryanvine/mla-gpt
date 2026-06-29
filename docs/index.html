@@ -69,7 +69,11 @@ relative to MHA while keeping per-token decode memory close to MQA, and&mdash;vi
 weight absorption&mdash;delivers decode throughput that <em>overtakes</em> MHA
 and GQA at long context. On the dev-scale quality sweep (&sect;6.1) the four
 variants fall within ~2.4% perplexity of one another, so the cache savings come
-at negligible quality cost; the 124M headline sweep (&sect;6.2) is pending.
+at negligible quality cost. At the 124M / 10B-token headline scale (&sect;6.2)
+the spread stays small (~4.6% perplexity) and the ordering sharpens: MLA is the
+strongest cache-reduced variant, <span class="win">Pareto-dominating GQA</span>
+on both quality and cache size and trailing full MHA by only ~1.8% perplexity
+while caching 5.6&times; less.
 </p>
 </div>
 
@@ -269,9 +273,9 @@ inference-time win, not a training-time cost.
 <h2>6&nbsp;&nbsp;Quality results</h2>
 <div class="note">
 Quality numbers are produced by controlled training sweeps with the attention
-variant as the <em>only</em> difference. The TinyStories dev sweep (&sect;6.1,
-≈50M params, 4k iters) is <strong>complete</strong>; the FineWeb-Edu headline
-sweep (&sect;6.2, 124M, ~10B tokens) is <strong>pending</strong>. Val loss is a
+variant as the <em>only</em> difference. Both are now <strong>complete</strong>:
+the TinyStories dev sweep (&sect;6.1, ≈50M params, 4k iters) and the FineWeb-Edu
+headline sweep (&sect;6.2, 124M, 20k iters ≈ 9.8B tokens). Val loss is a
 deterministic non-overlapping sweep over the held-out split; bits/byte normalizes
 by raw UTF-8 bytes so it is comparable across tokenizers.
 </div>
@@ -304,15 +308,56 @@ masks it. We do not over-read the ordering among the three cheap variants here.
   of quality cost at dev scale; MLA sits in the low-cache band beside MQA/GQA.</figcaption>
 </figure>
 <h3>6.2&nbsp;&nbsp;FineWeb-Edu (headline, 124M)</h3>
+<p class="small">
+Headline sweep: identical 12-layer / 768-wide backbone, 20,000 iterations
+(491,520 tokens/step &asymp; 9.8B tokens, ~1 epoch of FineWeb-Edu&nbsp;10B),
+identical AdamW / cosine schedule and seed; only <code>--attn</code> varies.
+Evaluated on the held-out split (47.8M tokens) from each variant's best
+checkpoint.
+</p>
 <table>
 <thead><tr><th>Variant</th><th>Params</th><th>KV B/tok</th><th>Val loss</th><th>Perplexity</th><th>Bits/byte</th></tr></thead>
 <tbody>
-<tr><td>MHA</td><td>123.6M</td><td>36,864</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
-<tr><td>GQA</td><td>114.2M</td><td>12,288</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
-<tr><td>MLA</td><td>116.1M</td><td>6,528</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
-<tr><td>MQA</td><td>110.6M</td><td>3,072</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
+<tr><td>MHA</td><td>123.6M</td><td>36,864 (1.0&times;)</td><td>3.0128</td><td>20.345</td><td>0.9409</td></tr>
+<tr><td>GQA</td><td>114.2M</td><td>12,288 (3.0&times;)</td><td>3.0349</td><td>20.798</td><td>0.9478</td></tr>
+<tr><td>MLA</td><td>116.1M</td><td>6,528 (5.6&times;)</td><td><span class="win">3.0309</span></td><td><span class="win">20.716</span></td><td><span class="win">0.9466</span></td></tr>
+<tr><td>MQA</td><td>110.6M</td><td>3,072 (12.0&times;)</td><td>3.0578</td><td>21.281</td><td>0.9550</td></tr>
 </tbody>
 </table>
+<p>
+At headline scale the four variants span just <strong>0.045 val loss</strong>
+(20.3&ndash;21.3 perplexity, ~4.6%), and the ordering sharpens into a clean
+result. MHA leads, as its full-width cache should. But among the three
+cache-reduced variants <strong>MLA wins</strong> (val loss 3.0309, vs
+GQA&nbsp;3.0349 and MQA&nbsp;3.0578) while caching <em>less</em> than
+GQA&mdash;6,528 vs 12,288 bytes/token. MLA therefore
+<span class="win">Pareto-dominates GQA</span>: strictly smaller cache <em>and</em>
+lower perplexity. It also closes most of the gap to MHA, trailing the full-cache
+model by only ~1.8% perplexity while using <strong>5.6&times;</strong> less KV
+memory. The head-diversity question left open at dev scale (&sect;6.1)&mdash;whether
+MLA's reconstructed per-head keys/values buy quality the head-sharing variants
+cannot&mdash;resolves in MLA's favor once 50M / 4k-iter under-training is removed.
+</p>
+<figure>
+  <img src="figures/headline_quality_vs_kv.png" alt="Validation perplexity vs KV-cache bytes per token at the 124M headline scale: MHA has the lowest perplexity at the largest cache; MLA sits below and to the left of GQA; MQA has the cheapest cache but the highest perplexity">
+  <figcaption><strong>Figure 8.</strong> Headline quality/efficiency trade-off
+  (124M, FineWeb-Edu); down-and-left is better. MLA sits <em>below and to the
+  left</em> of GQA&mdash;less cache <em>and</em> lower perplexity&mdash;and is the
+  closest cache-reduced variant to full MHA, which buys its quality lead with a
+  5.6&times; larger cache. MQA is cheapest but pays the most in quality.</figcaption>
+</figure>
+<p class="small">
+The four variants trained <em>concurrently</em>, one per GPU, on NVIDIA
+H100/H200 GPUs of Georgia Tech's <a href="https://pace.gatech.edu/">PACE-ICE</a>
+cluster. Tokens/step is held identical across variants, so the comparison stays
+controlled regardless of which GPU each variant landed on.
+</p>
+<figure>
+  <img src="h200_cluster.png" alt="Four NVIDIA H200 SXM GPU modules mounted on a node baseboard">
+  <figcaption><strong>Figure 9.</strong> Compute for the headline sweep: NVIDIA
+  H100/H200 GPUs on Georgia Tech's PACE-ICE cluster (pictured: a four-H200 node).
+  Each attention variant trained on its own GPU, in parallel.</figcaption>
+</figure>
 
 <h2>7&nbsp;&nbsp;Discussion</h2>
 <p>
@@ -323,7 +368,12 @@ full per-head keys and values, so it need not give up head diversity to save
 memory. The weight-absorption identity is what turns that smaller cache into an
 actual decode-throughput win at long context rather than a wash. The decisive
 question is whether that reconstruction preserves quality at a fixed token
-budget; &sect;6 reports the controlled answer.
+budget. At headline scale (&sect;6.2) it does: MLA is the best of the
+cache-reduced variants and the only one to Pareto-dominate GQA, recovering most
+of MHA's quality at a fraction of its cache. The retained per-head key/value
+diversity&mdash;not merely the smaller cache&mdash;is what separates MLA from
+MQA/GQA once the token budget is fixed and the under-training of dev scale is
+removed.
 </p>
 
 <h2>8&nbsp;&nbsp;Reproducibility</h2>
@@ -335,10 +385,22 @@ Code: <a href="https://github.com/bryanvine/mla-gpt">github.com/bryanvine/mla-gp
 uv run pytest                                   # correctness: cache equivalence, causality, absorption
 uv run python scripts/benchmark.py --max-context        # §5 efficiency + figures
 bash scripts/sweep_tinystories.sh               # §6.1 dev-scale quality sweep
-uv run python scripts/eval.py --glob 'runs/tinystories_*' --out runs/tinystories_eval</pre>
+uv run python scripts/eval.py --glob 'runs/tinystories_*' --out runs/tinystories_eval
+sbatch scripts/sweep_fineweb_pace.sbatch        # §6.2 headline sweep (4×GPU, PACE-ICE/Slurm)
+uv run python scripts/eval.py --glob 'runs/fineweb_*' --out runs/eval_fineweb</pre>
 <p class="small">
 A single base config trains every variant by changing only <code>--attn</code>,
 which is what keeps the attention mechanism the sole independent variable.
+</p>
+
+<h2>9&nbsp;&nbsp;Acknowledgments</h2>
+<p>
+The 124M headline sweep (&sect;6.2) was run on
+<a href="https://pace.gatech.edu/">PACE-ICE</a>, the instructional and research
+computing cluster at the Georgia Institute of Technology. We gratefully
+acknowledge Georgia Tech PACE-ICE for the research GPU time (NVIDIA H100/H200)
+that made headline-scale training feasible. All dev-scale work (&sect;5 efficiency
+and the &sect;6.1 sweep) runs on a single consumer RTX&nbsp;4080&nbsp;Super.
 </p>
 
 <hr>

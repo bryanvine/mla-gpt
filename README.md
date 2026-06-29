@@ -54,6 +54,28 @@ MLA compresses the cache **5.6×** vs MHA while reconstructing full per-head K/V
 (no head-sharing), and — via weight absorption — **overtakes MHA and GQA on decode
 throughput at long context**.
 
+## Quality results (FineWeb-Edu 10B headline, 124M)
+
+One shared 124M config, 20k iters (~9.8B tokens ≈ 1 epoch), identical schedule
+and seed — only `--attn` changes. Evaluated on the held-out split (47.8M tokens)
+from each variant's best checkpoint. Trained four-way parallel (one variant per
+GPU) on Georgia Tech's PACE-ICE cluster (NVIDIA H100/H200).
+
+| Variant | Params | KV B/tok | Val loss | Perplexity | Bits/byte |
+|--------|-------:|---------:|---------:|-----------:|----------:|
+| MHA | 123.6M | 36,864 (1.0×) | 3.0128 | 20.345 | 0.9409 |
+| GQA | 114.2M | 12,288 (3.0×) | 3.0349 | 20.798 | 0.9478 |
+| **MLA** | 116.1M | **6,528 (5.6×)** | **3.0309** | **20.716** | **0.9466** |
+| MQA | 110.6M | 3,072 (12.0×) | 3.0578 | 21.281 | 0.9550 |
+
+The ordering sharpens at scale. MHA leads (largest cache), but **MLA is the best
+of the cache-reduced variants**: it **Pareto-dominates GQA** — lower perplexity
+*and* a smaller cache (6,528 vs 12,288 B/tok) — and trails full MHA by only
+**~1.8% perplexity** while caching **5.6× less**. The head-diversity edge dev
+scale couldn't resolve lands in MLA's favor here.
+
+![Quality vs KV-cache at 124M headline scale: MLA sits below and to the left of GQA — smaller cache and lower perplexity — while MHA pays a 5.6× larger cache for its quality lead and MQA is cheapest but weakest](docs/figures/headline_quality_vs_kv.png)
+
 ## Quality results (TinyStories dev sweep, ~50M, 4k iters)
 
 One shared config, only `--attn` changes. Val loss is a deterministic
@@ -69,8 +91,9 @@ bytes (tokenizer-independent).
 
 At dev scale all four land within **0.024 val loss (~2.4% perplexity)** — cutting
 the KV cache **4–8×** costs essentially nothing in quality. MLA matches the
-GQA/MQA band while keeping full per-head K/V. The 124M FineWeb-Edu headline sweep
-is pending; full numbers land in the [paper](https://bryanvine.github.io/mla-gpt/).
+GQA/MQA band while keeping full per-head K/V; at the 124M headline scale above,
+that retained head diversity converts into a measurable edge. Full writeup in the
+[paper](https://bryanvine.github.io/mla-gpt/).
 
 ## Setup
 
@@ -106,6 +129,15 @@ configs/            tinystories_base.yaml (dev) · gpt2_124m_base.yaml (headline
 tests/              correctness (cache equivalence, causality, absorption, param bands)
 docs/               the github.io paper + figures
 ```
+
+## Acknowledgments
+
+The 124M headline sweep ran on **Georgia Tech's [PACE-ICE](https://pace.gatech.edu/)**
+cluster. We gratefully acknowledge PACE-ICE for the research GPU time (NVIDIA
+H100/H200) that made headline-scale training feasible; all dev-scale work runs on
+a single RTX 4080 Super.
+
+![Four NVIDIA H200 GPU modules on a PACE-ICE node — the headline sweep trained one attention variant per GPU in parallel](docs/h200_cluster.png)
 
 ## License
 

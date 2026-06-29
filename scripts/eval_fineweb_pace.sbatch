@@ -10,7 +10,8 @@
 #SBATCH -J mla_eval
 #SBATCH -N 1
 #SBATCH -p ice-gpu
-#SBATCH --gres=gpu:h200:1
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=HX00
 #SBATCH -c 4
 #SBATCH --mem-per-cpu=8G
 #SBATCH -t 60
