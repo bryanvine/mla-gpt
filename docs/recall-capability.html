@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Recall Cliff: Where KV-Cache Reduction Finally Costs Capability</title>
+<script>
+MathJax = { tex: { inlineMath: [['$', '$'], ['\\(', '\\)']] } };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+<style>
+  :root { --fg:#1a1a1a; --muted:#666; --accent:#2ca02c; --rule:#e2e2e2; --bg:#fdfdfc; }
+  html { -webkit-text-size-adjust:100%; }
+  body {
+    color:var(--fg); background:var(--bg); margin:0;
+    font:18px/1.62 Georgia,'Times New Roman',serif;
+  }
+  .wrap { max-width:760px; margin:0 auto; padding:48px 22px 96px; }
+  h1 { font-size:1.92em; line-height:1.22; margin:0 0 .35em; letter-spacing:-.01em; }
+  h2 { font-size:1.3em; margin:2.2em 0 .55em; padding-bottom:.18em; border-bottom:1px solid var(--rule); }
+  h3 { font-size:1.06em; margin:1.6em 0 .4em; }
+  p { margin:0 0 1em; }
+  a { color:#1f6f3f; }
+  .byline { color:var(--muted); font-size:.95em; margin:.2em 0 1.6em; }
+  .abstract { background:#f6f6f4; border:1px solid var(--rule); border-radius:8px; padding:18px 22px; font-size:.97em; }
+  .abstract h2 { border:0; margin:.1em 0 .4em; font-size:1.05em; }
+  code, .mono { font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace; font-size:.86em; }
+  table { border-collapse:collapse; width:100%; margin:1.2em 0; font-size:.86em;
+          font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace; }
+  th, td { border:1px solid var(--rule); padding:7px 10px; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  thead th { background:#f0f0ee; }
+  tbody tr:nth-child(even) { background:#faf9f7; }
+  figure { margin:1.6em 0; text-align:center; }
+  figure img { max-width:100%; height:auto; border:1px solid var(--rule); border-radius:6px; }
+  figcaption { color:var(--muted); font-size:.84em; margin-top:.5em; text-align:left; }
+  .note { background:#fff8e6; border-left:3px solid #e3b341; padding:10px 16px; font-size:.9em; border-radius:0 6px 6px 0; }
+  .win { color:var(--accent); font-weight:bold; }
+  .bad { color:#c0392b; font-weight:bold; }
+  .small { font-size:.85em; color:var(--muted); }
+  hr { border:0; border-top:1px solid var(--rule); margin:2.4em 0; }
+  ul { margin:0 0 1em; padding-left:1.3em; }
+  li { margin:.25em 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<p class="small" style="margin:0 0 1.4em"><a href="index.html">Attention, Controlled</a> &middot; Paper 2 of the series</p>
+<h1>The Recall Cliff:<br>Where KV-Cache Reduction Finally Costs Capability</h1>
+<div class="byline">
+  Bryan Vine &middot; 2026 &middot;
+  <a href="https://github.com/bryanvine/mla-gpt">github.com/bryanvine/mla-gpt</a> &middot;
+  <a href="index.html">&uarr; Series index</a>
+</div>
+
+<div class="abstract">
+<h2>Abstract</h2>
+<p>
+<a href="attention-variants.html">Paper&nbsp;1</a> showed that swapping the attention
+mechanism to shrink the KV cache costs almost nothing in language-model
+perplexity&mdash;MHA, MQA, GQA, and MLA land within ~4.6% of one another at
+124M parameters. But perplexity averages over a whole sequence; it can hide a
+capability that only a handful of tokens exercise. Here we stress the same four
+variants on <em>synthetic recall</em> under controlled difficulty, holding the
+backbone, optimizer, data generator, and token budget fixed and varying
+<strong>only</strong> the attention module. Plain copy and selective copy are
+solved by every variant at every difficulty, regardless of cache size. But
+multi-query associative recall (MQAR) exposes a <strong>capacity cliff ordered by
+KV-cache width</strong>: past ~64 stored key&ndash;value pairs accuracy collapses
+in cache order (MHA&nbsp;&gt;&nbsp;GQA&nbsp;&gt;&nbsp;MQA&nbsp;&gt;&nbsp;MLA), and at
+96 pairs only the two largest caches can still escape&mdash;and only given enough
+optimization budget. Two confound controls sharpen the claim. (1) The cliff is
+<em>real</em>: doubling the iteration budget does not rescue the smallest caches,
+so the <em>floor</em>&mdash;which variants can never solve a difficulty&mdash;is set
+by cache size. (2) But much of the cliff's apparent steepness at the original
+budget is a <em>learning-rate-schedule artifact</em>, not pure capacity: a gentler
+cosine recovers grokking for the larger caches <em>within the original budget</em>
+in 8 of 10 borderline cells. On natural text, finally, the position-wise loss
+curves of all four variants are nearly identical&mdash;the cliff lives in the
+synthetic stress test, which is exactly why Paper&nbsp;1's headline perplexity
+could not see it.
+</p>
+</div>
+
+<h2>1&nbsp;&nbsp;Introduction</h2>
+<p>
+A single averaged number is a poor instrument for a capability that lives in the
+tail. Paper&nbsp;1 measured the four attention variants on the thing language
+models are trained for&mdash;next-token prediction&mdash;and found the KV-cache
+reduction nearly free: cutting the cache 5.6&ndash;12&times; cost at most ~4.6%
+perplexity, and MLA even Pareto-dominated GQA. The natural worry is that
+perplexity is the wrong lens for the thing a small cache might actually break:
+<em>retrieval</em>. Most tokens in natural text are predictable from local
+context; the rare token that requires reaching back to a specific earlier fact
+contributes almost nothing to the mean. If a smaller cache loses exactly that
+ability, perplexity would barely flinch.
+</p>
+<p>
+So we go looking for the break directly. We train the same four variants on
+synthetic tasks with a tunable difficulty knob and ask a sharper question than
+"what is the average loss": <em>at what difficulty does each variant stop being
+able to do the task at all, and is that ceiling set by the KV cache?</em> The
+headline probe is <strong>multi-query associative recall</strong> (MQAR): the
+model sees a list of key&ndash;value pairs followed by queried keys and must emit
+the matching values. Difficulty is the number of stored pairs that compete for
+the same cache. We pair it with two controls&mdash;plain copy (positional, no
+content addressing) and selective copy (content-gated copying)&mdash;and bridge
+back to natural language with a position-decomposed loss on the Paper&nbsp;1
+TinyStories checkpoints.
+</p>
+
+<h2>2&nbsp;&nbsp;Setup</h2>
+<p>
+The model is deliberately small so that the cache, not raw capacity, is the
+binding constraint and so the whole sweep runs on one consumer GPU: a 4-layer,
+256-wide, 8-head GPT with the identical pluggable-attention backbone, RoPE, and
+SwiGLU MLP from Paper&nbsp;1. Only <code>--attn</code> changes. At this size the
+per-token KV cache (all layers, bf16) and parameter counts are:
+</p>
+<table>
+<thead><tr><th>Variant</th><th>Params</th><th>KV bytes/token</th><th>vs MHA</th></tr></thead>
+<tbody>
+<tr><td>MHA</td><td>3.34M</td><td>4,096</td><td>1.0&times;</td></tr>
+<tr><td>GQA ($g{=}2$)</td><td>2.95M</td><td>1,024</td><td>4.0&times;</td></tr>
+<tr><td>MQA</td><td>2.89M</td><td>512</td><td>8.0&times;</td></tr>
+<tr><td>MLA</td><td>2.92M</td><td>320</td><td><span class="win">12.8&times;</span></td></tr>
+</tbody>
+</table>
+<p>
+The cache ordering MHA&nbsp;&gt;&nbsp;GQA&nbsp;&gt;&nbsp;MQA&nbsp;&gt;&nbsp;MLA is the
+same as the 124M model; only the absolute sizes shrink with depth and width.
+Every run trains to a fixed 60,000-iteration budget with an early-stop trigger
+when validation loss crosses a threshold&mdash;the synthetic tasks sit on a high
+plateau and then "grok" with a near-vertical drop, so the crossing iter doubles
+as a sample-efficiency measurement. Each (variant&nbsp;&times;&nbsp;difficulty)
+cell is run over <strong>four seeds</strong> (1234, 1337, 2024, 31337); reported
+accuracy is the mean over seeds at the best checkpoint. MQAR difficulty sweeps
+{16, 32, 64, 96, 128} stored pairs.
+</p>
+
+<h2>3&nbsp;&nbsp;Control: plain copy is free for everyone</h2>
+<p>
+Before reading anything into a recall gap, we confirm that cache width does
+<em>not</em> bound a task that needs no content addressing. Plain copy&mdash;emit
+the input sequence back&mdash;is solved at <strong>1.00 accuracy by all four
+variants at every length</strong> from 16 to 480 tokens, each grokking within the
+first 500 iterations. A copy head only needs to attend by position, which even the
+single shared latent of MLA supports trivially. This is the baseline that makes
+the MQAR result interpretable: any gap there is about <em>content-addressed
+lookup under competition</em>, not about moving tokens around.
+</p>
+<figure>
+  <img src="figures/recall_copy_cliff.png" alt="Plain-copy accuracy vs length: all four variants flat at 1.0 across every difficulty">
+  <figcaption><strong>Figure 1.</strong> Plain copy (control). Every variant is
+  pinned at 1.00 across the full length range&mdash;positional copying is
+  cache-insensitive, so it isolates content addressing as the only thing MQAR adds.</figcaption>
+</figure>
+
+<h2>4&nbsp;&nbsp;The recall cliff (MQAR)</h2>
+<p>
+Associative recall tells a completely different story. Accuracy is near-ceiling for
+all variants while the pairs are few, then falls off a cliff&mdash;and the cliff is
+ordered by cache size.
+</p>
+<table>
+<thead><tr><th>Variant</th><th>KV B/tok</th><th>16</th><th>32</th><th>64</th><th>96</th><th>128</th></tr></thead>
+<tbody>
+<tr><td>MHA</td><td>4,096</td><td>0.98</td><td>0.95</td><td>0.67</td><td><span class="win">0.43</span></td><td>0.00</td></tr>
+<tr><td>GQA</td><td>1,024</td><td>0.96</td><td>0.95</td><td>0.92</td><td>0.35</td><td>0.00</td></tr>
+<tr><td>MQA</td><td>512</td><td>0.95</td><td>0.94</td><td>0.92</td><td>0.19</td><td>0.00</td></tr>
+<tr><td>MLA</td><td>320</td><td>0.96</td><td>0.94</td><td>0.67</td><td><span class="bad">0.00</span></td><td>0.00</td></tr>
+</tbody>
+</table>
+<p class="small">Mean recall accuracy over 4 seeds, 60k-iter budget. Difficulty = stored key&ndash;value pairs.</p>
+<p>
+Three regimes are visible. Up to 32 pairs the task is easy for every cache (all
+&ge;0.94). At <strong>96 pairs the variants separate cleanly in cache order</strong>:
+MHA&nbsp;0.43&nbsp;&gt;&nbsp;GQA&nbsp;0.35&nbsp;&gt;&nbsp;MQA&nbsp;0.19&nbsp;&gt;&nbsp;MLA&nbsp;0.00.
+At 128 pairs everyone hits the floor (0.00)&mdash;a universal ceiling of a model
+this small. The 64-pair column looks anomalous (GQA/MQA at 0.92 beat MHA/MLA at
+0.67), and resolving that anomaly is the job of &sect;5; it turns out to be an
+optimization artifact, not a capacity inversion.
+</p>
+<figure>
+  <img src="figures/recall_mqar_cliff.png" alt="MQAR accuracy vs stored pairs: all variants high until 32 pairs, then a cache-ordered collapse by 96 pairs and a shared floor at 128">
+  <figcaption><strong>Figure 2.</strong> The recall cliff. Accuracy holds near ceiling
+  to 32 pairs, then collapses; by 96 pairs the ordering is exactly the cache
+  ordering (MHA &gt; GQA &gt; MQA &gt; MLA). Error bars are &plusmn;1 SD over 4 seeds.</figcaption>
+</figure>
+<p>
+The cliff is just as visible in <em>sample efficiency</em>: the iterations needed
+to grok climb steeply with difficulty and then go to infinity (the cell never
+solves within budget). MLA grokks 64 pairs only after ~40k iters and never reaches
+96; the larger caches grok sooner and reach further.
+</p>
+<figure>
+  <img src="figures/recall_mqar_grok.png" alt="Iterations-to-grok vs stored pairs on a log scale, with x marks for cells that never groked within budget">
+  <figcaption><strong>Figure 3.</strong> Recall sample-efficiency. Lower is faster to
+  learn; an &times; at the cap marks a difficulty the variant never solved within the
+  60k budget. The smaller the cache, the sooner the curve hits the ceiling.</figcaption>
+</figure>
+<p>
+Reframed against the cache axis at the hardest <em>solvable</em> difficulty, the
+result is the mirror image of Paper&nbsp;1's quality/efficiency Pareto front: there,
+spending less cache was nearly free; here, spending less cache buys strictly less
+recall.
+</p>
+<figure>
+  <img src="figures/recall_mqar_pareto.png" alt="Recall accuracy at 96 pairs vs KV-cache bytes per token: accuracy rises monotonically with cache size">
+  <figcaption><strong>Figure 4.</strong> Capability vs KV footprint at 96 pairs. Unlike
+  the language-modeling Pareto front of Paper&nbsp;1, recall accuracy rises
+  monotonically with cache width&mdash;the compression that was free for perplexity is
+  not free here.</figcaption>
+</figure>
+
+<h2>5&nbsp;&nbsp;Is the cliff capacity, or just budget?</h2>
+<p>
+A fixed-budget sweep conflates two things: a variant might fail a difficulty
+because it <em>cannot</em> represent the task (capacity) or because it simply did
+not finish learning it in 60k iters (budget). We disentangle them with two
+controls run locally on the RTX&nbsp;4080.
+</p>
+
+<h3>5.1&nbsp;&nbsp;Doubling the budget: the floor is real, the 64-pair dip is not</h3>
+<p>
+Re-running every cap-limited cell at a <strong>2&times; (120k) budget</strong>
+separates budget-limited cells (they flip to solved) from capacity-limited cells
+(they stay at zero). The 64-pair anomaly evaporates: the MHA and MLA dips to 0.67
+were single un-groked seeds, and at 120k <em>every</em> variant reaches ~0.90 at 64
+pairs (g4/4). The headline U-shape was a budget artifact. At 96 pairs, by contrast,
+the extra budget is <strong>cache-gated</strong>:
+</p>
+<table>
+<thead><tr><th>Variant</th><th>KV B/tok</th><th>acc @60k (grok/4)</th><th>acc @120k (grok/4)</th><th>verdict at 96 pairs</th></tr></thead>
+<tbody>
+<tr><td>MHA</td><td>4,096</td><td>0.43 (1/4)</td><td>0.66 (3/4)</td><td><span class="win">escapes</span> (budget)</td></tr>
+<tr><td>GQA</td><td>1,024</td><td>0.35 (0/4)</td><td>0.90 (4/4)</td><td><span class="win">escapes</span> (budget)</td></tr>
+<tr><td>MQA</td><td>512</td><td>0.19 (0/4)</td><td>0.36 (1/4)</td><td>mostly capacity-bound</td></tr>
+<tr><td>MLA</td><td>320</td><td>0.00 (0/4)</td><td>0.35 (0/4)</td><td><span class="bad">capacity-bound</span> (0/4)</td></tr>
+</tbody>
+</table>
+<p>
+The dividing line is sharp: <strong>caches &ge;1024&nbsp;B (MHA, GQA) escape 96
+pairs given budget; caches &le;512&nbsp;B (MQA, MLA) do not.</strong> GQA fully
+recovers (4/4 grok, 0.90), MHA mostly (3/4); MQA crosses the threshold in only one
+of four seeds and MLA in none&mdash;even at double the budget. So the <em>floor</em>
+of the cliff&mdash;the difficulty a variant can never reach&mdash;is genuinely set
+by cache size, not by how long we train.
+</p>
+<figure>
+  <img src="figures/recall_mqar_cliff_cap120k.png" alt="MQAR cliff after doubling the iteration budget: the 64-pair dip is gone and 96 pairs is solved only by the larger caches">
+  <figcaption><strong>Figure 5.</strong> The cliff at 2&times; budget. The 64-pair dip is
+  gone (all variants ~0.90), and 96 pairs is now cleanly cache-gated: the larger
+  caches climb out, the smaller two stay pinned near the floor.</figcaption>
+</figure>
+
+<h3>5.2&nbsp;&nbsp;Was the &ldquo;budget&rdquo; effect really iterations&mdash;or the LR schedule?</h3>
+<p>
+"2&times; budget" changes two things at once: more iterations <em>and</em> a gentler
+cosine decay (a 120k schedule sustains a higher learning rate at every iter&nbsp;&lt;&nbsp;60k).
+To separate them we re-ran the borderline cells for the original 60k iterations but
+under the <em>120k LR shape</em> (<code>max_iters=60000, lr_decay_iters=120000</code>),
+so the only change from the canonical run is a gentler decay. The result is
+striking: <strong>8 of 10 cells that the 2&times; budget rescued already grok within
+the original 60k budget once the LR is gentler</strong> (the steep-schedule baseline
+groks 0/10). Only two cells genuinely need iterations beyond 60k.
+</p>
+<table>
+<thead><tr><th>cell</th><th>steep 60k</th><th>gentle 60k</th><th>gentle 120k</th><th>grok&le;60k?</th><th>cause</th></tr></thead>
+<tbody>
+<tr><td>gqa p96 s1234</td><td>&mdash;</td><td>grok@43k</td><td>grok@48k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>gqa p96 s1337</td><td>&mdash;</td><td>&mdash;</td><td>grok@47.5k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>gqa p96 s2024</td><td>&mdash;</td><td>grok@45.5k</td><td>grok@70.5k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>gqa p96 s31337</td><td>&mdash;</td><td>&mdash;</td><td>grok@86k</td><td><span class="bad">no</span></td><td>extra-iters</td></tr>
+<tr><td>mha p64 s2024</td><td>&mdash;</td><td>grok@50k</td><td>grok@22k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>mha p64 s31337</td><td>&mdash;</td><td>grok@60k</td><td>grok@23.5k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>mha p96 s1234</td><td>&mdash;</td><td>&mdash;</td><td>grok@53k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>mha p96 s2024</td><td>&mdash;</td><td>grok@42.5k</td><td>grok@37k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>mla p64 s2024</td><td>&mdash;</td><td>&mdash;</td><td>grok@57k</td><td>yes</td><td>LR-shape</td></tr>
+<tr><td>mqa p96 s31337</td><td>&mdash;</td><td>&mdash;</td><td>grok@104.5k</td><td><span class="bad">no</span></td><td>extra-iters</td></tr>
+</tbody>
+</table>
+<p class="small">
+&ldquo;&mdash;&rdquo; in the steep/gentle-60k columns means the cell did not grok within
+60k iters. &ldquo;grok&le;60k? = yes&rdquo; if either gentle sample crossed before 60k.
+</p>
+<p>
+So the apparent steepness of the original cliff is <strong>predominantly an
+LR-schedule effect, not iteration count</strong>: the canonical 60k sweep was, in
+part, starving the larger caches with too steep a decay rather than measuring their
+capacity. This does not move the floor&mdash;MQA and MLA at 96 pairs stay
+capacity-bound under either schedule&mdash;but it does mean the precise position of
+the cliff for the rescuable variants is a property of the optimizer as much as the
+architecture.
+</p>
+<div class="note">
+<strong>Methodological caveat (grok timing is noisy).</strong> The grok iteration is
+strongly nondeterministic even at fixed seed: bf16 + CUDA + <code>torch.compile</code>
+on a near-vertical transition shifts the crossing by <strong>5k&ndash;36.5k iters</strong>
+between two otherwise-identical runs (e.g. mha&nbsp;p64&nbsp;s31337 above: 60k vs
+23.5k). We therefore never read a conclusion off a single grok-iter; the stable,
+reported metrics are the <em>binary</em> &ldquo;did it grok within budget&rdquo; and the
+best-checkpoint accuracy.
+</div>
+
+<h2>6&nbsp;&nbsp;Selective copy: solvable everywhere, but slower to learn for MLA</h2>
+<p>
+Between trivial positional copy and adversarial associative recall sits
+<em>selective copy</em>: copy only the marked tokens, in order. Every variant
+solves it at every difficulty (accuracy 0.88&ndash;0.99 from 16 to 256 tokens to
+select)&mdash;content gating alone does not need a wide cache. But the cost shows up
+in <em>sample efficiency</em>: the three larger caches grok in 500&ndash;3500 iters,
+while <strong>MLA needs 1.5k&ndash;17.5k</strong>&mdash;up to ~8&times; more at the
+harder settings. The narrow
+latent does not prevent MLA from learning selective copy; it makes it the slowest to
+get there&mdash;a milder version of the optimization penalty that, on the harder
+MQAR task, becomes an outright capacity ceiling.
+</p>
+<figure>
+  <img src="figures/recall_selective_copy_grok.png" alt="Selective-copy iterations-to-grok vs difficulty: MHA/GQA/MQA stay low while MLA rises far above them">
+  <figcaption><strong>Figure 6.</strong> Selective-copy sample efficiency. Final
+  accuracy is high for all variants (not shown: a near-flat ~0.9&ndash;0.99 cliff);
+  the separation is in <em>how long</em> learning takes&mdash;MLA's latent bottleneck
+  makes it markedly slower even where it eventually succeeds.</figcaption>
+</figure>
+
+<h2>7&nbsp;&nbsp;Length extrapolation (train short, test long)</h2>
+<p>
+Training one model at a fixed difficulty and evaluating it at others probes
+generalization beyond the trained load. No variant extrapolates strongly: accuracy
+holds up to roughly the trained difficulty and then decays. The decay is broadly
+similar across caches&mdash;it is a length-generalization limit of the
+backbone/RoPE more than a cache effect&mdash;with one consistent exception: trained
+on the easiest setting, <strong>MLA degrades fastest</strong> (it drops to ~0.50 by
+double the trained difficulty where the others hold ~0.80). The same narrow latent
+that compresses the cache also carries the least margin for loads it was not trained
+on.
+</p>
+<figure>
+  <img src="figures/recall_mqar_extrapolation.png" alt="Train-short/test-long MQAR accuracy: all variants decay past the trained difficulty, MLA fastest">
+  <figcaption><strong>Figure 7.</strong> MQAR train-short/test-long (models trained at
+  16 pairs). All variants fall off past the trained difficulty (dashed line); MLA's
+  curve drops earliest and steepest.</figcaption>
+</figure>
+
+<h2>8&nbsp;&nbsp;The natural-text bridge: why perplexity hid all of this</h2>
+<p>
+Does any of the synthetic cliff show up on real language? We decompose the
+held-out cross-entropy of the Paper&nbsp;1 TinyStories checkpoints <em>by token
+position</em>&mdash;the metric the headline perplexity averaged away, and the one
+most likely to reveal a long-range advantage. It does not separate the variants.
+All four fall from ~2.03 nats at position 16 to ~1.40 nats at position 496, and the
+spread at the long end is just <strong>~0.026 nats</strong> (MHA 1.402, MQA 1.408,
+GQA 1.422, MLA 1.428).
+</p>
+<figure>
+  <img src="figures/loss_vs_position.png" alt="Cross-entropy vs token position on TinyStories: four nearly overlapping curves descending from ~2.0 to ~1.4 nats">
+  <figcaption><strong>Figure 8.</strong> Position-wise loss on natural text. The four
+  curves are nearly coincident&mdash;even decomposed by position, the cache ordering
+  that dominates MQAR is invisible on TinyStories. Natural language rarely demands
+  dense, exact, content-addressed lookup over many competing keys, so the cliff never
+  triggers.</figcaption>
+</figure>
+<p>
+This is the reconciliation. The recall cliff is not in tension with Paper&nbsp;1's
+&ldquo;cache reduction is nearly free&rdquo;&mdash;it is the precise condition under
+which that verdict stops holding. Free for next-token prediction on natural text;
+not free when the task is dense associative recall at the edge of the model's
+capacity.
+</p>
+
+<h2>9&nbsp;&nbsp;Discussion</h2>
+<p>
+Put the two papers together. Paper&nbsp;1: cutting the KV cache 5.6&ndash;12&times;
+costs &le;4.6% perplexity and MLA Pareto-dominates GQA on the quality/efficiency
+front. Paper&nbsp;2: that same cut <em>does</em> cost capability on dense associative
+recall, and it costs it in cache order&mdash;up to ~32 pairs it is free for everyone;
+at 64 pairs it is free given budget; at 96 pairs it is cache-gated, recoverable only
+for caches &ge;1024&nbsp;B; at 128 pairs nobody in this small model can do it. The
+compression that makes MLA a great deal for language modeling is the very thing that
+gives it the least associative-recall headroom.
+</p>
+<p>
+Two caveats keep the claim honest. First, the cliff's <em>location</em> for the
+rescuable variants is partly an optimizer property&mdash;a gentler LR schedule moves
+it&mdash;so a fixed-budget capacity table should be read as an upper bound on
+difficulty, not a hard architectural limit. The <em>floor</em>, however (which
+variants cannot solve a difficulty at any budget or schedule we tried), is robustly
+cache-ordered. Second, this is a small model on a single difficulty axis; the
+absolute cliff positions will move with depth, width, and head count, even if the
+cache ordering does not. A practitioner takeaway nonetheless: if your workload leans
+on heavy in-context retrieval near the model's limit, the KV cache you can afford is
+also the recall ceiling you can reach&mdash;and it is worth tuning the schedule
+before concluding a variant simply cannot.
+</p>
+
+<h2>10&nbsp;&nbsp;Reproducibility</h2>
+<p>
+Everything runs on one consumer GPU.
+Code: <a href="https://github.com/bryanvine/mla-gpt">github.com/bryanvine/mla-gpt</a>.
+</p>
+<pre class="mono">uv sync
+bash scripts/sweep_recall.sh                                      # §3–4,6–7 synthetic sweep (4 seeds)
+uv run python scripts/eval_recall.py --glob 'runs/recall_*' --out runs/recall_eval
+bash scripts/recall_cap120k.sh                                    # §5.1 2× budget control
+uv run python scripts/recall_cap_compare.py
+bash scripts/recall_lrctrl.sh                                     # §5.2 LR-shape vs extra-iters
+uv run python scripts/recall_lrctrl_compare.py</pre>
+<p class="small">
+A single base config (<code>configs/recall_base.yaml</code>) trains every variant by
+changing only <code>--attn</code>; the sweep, the 2&times;-budget control, and the
+LR-shape control share that config so the attention mechanism stays the sole
+independent variable.
+</p>
+
+<h2>11&nbsp;&nbsp;Acknowledgments</h2>
+<p>
+The full recall study&mdash;the synthetic sweep and both confound controls&mdash;runs
+locally on a single consumer RTX&nbsp;4080&nbsp;Super (16&nbsp;GB). The
+124M-parameter checkpoints used for the natural-text bridge (&sect;8) come from
+<a href="attention-variants.html">Paper&nbsp;1</a>, whose headline sweep ran on
+<a href="https://pace.gatech.edu/">PACE-ICE</a>, Georgia Tech's instructional and
+research computing cluster; we gratefully acknowledge PACE-ICE for that GPU time.
+</p>
+
+<hr>
+<p class="small">
+Part of <a href="index.html">Attention, Controlled</a>. Built from scratch in
+PyTorch; MQAR follows the associative-recall probes of Arora et&nbsp;al. (2023).
+&copy;&nbsp;2026 Bryan Vine, MIT-licensed.
+</p>
+
+</div>
+</body>
+</html>

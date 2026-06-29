@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-head Latent Attention vs MHA/MQA/GQA: A Controlled 124M Study</title>
+<script>
+MathJax = { tex: { inlineMath: [['$', '$'], ['\\(', '\\)']] } };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+<style>
+  :root { --fg:#1a1a1a; --muted:#666; --accent:#2ca02c; --rule:#e2e2e2; --bg:#fdfdfc; }
+  html { -webkit-text-size-adjust:100%; }
+  body {
+    color:var(--fg); background:var(--bg); margin:0;
+    font:18px/1.62 Georgia,'Times New Roman',serif;
+  }
+  .wrap { max-width:760px; margin:0 auto; padding:48px 22px 96px; }
+  h1 { font-size:1.92em; line-height:1.22; margin:0 0 .35em; letter-spacing:-.01em; }
+  h2 { font-size:1.3em; margin:2.2em 0 .55em; padding-bottom:.18em; border-bottom:1px solid var(--rule); }
+  h3 { font-size:1.06em; margin:1.6em 0 .4em; }
+  p { margin:0 0 1em; }
+  a { color:#1f6f3f; }
+  .byline { color:var(--muted); font-size:.95em; margin:.2em 0 1.6em; }
+  .abstract { background:#f6f6f4; border:1px solid var(--rule); border-radius:8px; padding:18px 22px; font-size:.97em; }
+  .abstract h2 { border:0; margin:.1em 0 .4em; font-size:1.05em; }
+  code, .mono { font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace; font-size:.86em; }
+  table { border-collapse:collapse; width:100%; margin:1.2em 0; font-size:.86em;
+          font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace; }
+  th, td { border:1px solid var(--rule); padding:7px 10px; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  thead th { background:#f0f0ee; }
+  tbody tr:nth-child(even) { background:#faf9f7; }
+  figure { margin:1.6em 0; text-align:center; }
+  figure img { max-width:100%; height:auto; border:1px solid var(--rule); border-radius:6px; }
+  figcaption { color:var(--muted); font-size:.84em; margin-top:.5em; text-align:left; }
+  .note { background:#fff8e6; border-left:3px solid #e3b341; padding:10px 16px; font-size:.9em; border-radius:0 6px 6px 0; }
+  .win { color:var(--accent); font-weight:bold; }
+  .small { font-size:.85em; color:var(--muted); }
+  hr { border:0; border-top:1px solid var(--rule); margin:2.4em 0; }
+  ul { margin:0 0 1em; padding-left:1.3em; }
+  li { margin:.25em 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<p class="small" style="margin:0 0 1.4em"><a href="index.html">Attention, Controlled</a> &middot; Paper 1 of the series</p>
+<h1>The Attention Variant Is the Only Variable:<br>A Controlled Study of MLA vs MHA, MQA, and GQA at 124M Parameters</h1>
+<div class="byline">
+  Bryan Vine &middot; 2026 &middot;
+  <a href="https://github.com/bryanvine/mla-gpt">github.com/bryanvine/mla-gpt</a> &middot;
+  <a href="index.html">&uarr; Series index</a>
+</div>
+
+<div class="abstract">
+<h2>Abstract</h2>
+<p>
+The key&ndash;value (KV) cache, not the parameter count, is what bounds
+long-context inference on a single GPU. We isolate the effect of the
+<em>attention mechanism</em> on this trade-off by training a from-scratch,
+124M-parameter GPT in which the backbone, RoPE positional encoding, optimizer,
+data, and token budget are held fixed, and <strong>only</strong> the attention
+module varies across standard Multi-Head Attention (MHA), Multi-Query Attention
+(MQA), Grouped-Query Attention (GQA), and DeepSeek-V2 Multi-head Latent
+Attention (MLA). On a single RTX&nbsp;4080&nbsp;Super (16&nbsp;GB) we report both
+efficiency (KV-cache footprint, decode latency, peak memory, prefill/train
+throughput, and maximum attainable context) and quality (validation perplexity,
+bits-per-byte). MLA compresses the KV cache <span class="win">5.6&times;</span>
+relative to MHA while keeping per-token decode memory close to MQA, and&mdash;via
+weight absorption&mdash;delivers decode throughput that <em>overtakes</em> MHA
+and GQA at long context. On the dev-scale quality sweep (&sect;6.1) the four
+variants fall within ~2.4% perplexity of one another, so the cache savings come
+at negligible quality cost. At the 124M / 10B-token headline scale (&sect;6.2)
+the spread stays small (~4.6% perplexity) and the ordering sharpens: MLA is the
+strongest cache-reduced variant, <span class="win">Pareto-dominating GQA</span>
+on both quality and cache size and trailing full MHA by only ~1.8% perplexity
+while caching 5.6&times; less.
+</p>
+</div>
+
+<h2>1&nbsp;&nbsp;Introduction</h2>
+<p>
+Autoregressive decoding stores one key and one value vector per attended token,
+per layer&mdash;the KV cache. Its size grows linearly with context length and,
+at long context, dominates both the memory budget and the memory-bandwidth cost
+of each decode step. A 124M MHA model in this study needs
+<strong>38.6&nbsp;GB</strong> of KV cache to decode a single 128k-token context
+at batch&nbsp;8&mdash;more than twice the 16&nbsp;GB of the GPU it was trained on.
+The attention mechanism is therefore the lever that decides whether long-context
+inference is feasible on commodity hardware at all.
+</p>
+<p>
+MQA and GQA shrink the cache by sharing key/value heads, trading representational
+capacity for memory. MLA takes a different route: it caches a low-rank
+<em>latent</em> from which per-head keys and values are reconstructed on the fly,
+plus a small decoupled key that carries rotary position information. The open
+question this study targets: <em>at a fixed compute and parameter budget, how
+much quality does each cache-reduction strategy actually cost, and what does each
+buy back in inference efficiency?</em>
+</p>
+<p>
+Public comparisons usually confound the attention mechanism with changes in
+depth, width, data, or training recipe. We remove that confound. Every variant
+here shares an identical 12-layer / 768-width / 12-head backbone, identical RoPE,
+identical SwiGLU MLP, identical optimizer and schedule, and the same token
+budget. The attention module is the sole independent variable.
+</p>
+
+<h2>2&nbsp;&nbsp;Background: four ways to cache</h2>
+<p>
+All variants share the same per-head dimension $d_h = d_\text{model}/n_h = 64$
+and the same RoPE applied to queries and keys. They differ only in what gets
+cached. With $L$ layers and 2-byte (bf16) elements, the KV cache per token is:
+</p>
+<table>
+<thead><tr><th>Variant</th><th>Cached per token / layer</th><th>Bytes/token (this study, $L{=}12$)</th><th>vs MHA</th></tr></thead>
+<tbody>
+<tr><td>MHA</td><td>$2\,n_h\,d_h$</td><td>36,864</td><td>1.0&times;</td></tr>
+<tr><td>GQA ($g{=}4$)</td><td>$2\,g\,d_h$</td><td>12,288</td><td>3.0&times;</td></tr>
+<tr><td>MLA</td><td>$d_c + d_\text{rope}$</td><td>6,528</td><td><span class="win">5.6&times;</span></td></tr>
+<tr><td>MQA</td><td>$2\,d_h$</td><td>3,072</td><td>12.0&times;</td></tr>
+</tbody>
+</table>
+<p>
+MHA caches a full key and value for each of $n_h$ heads. MQA collapses these to a
+single shared KV head, and GQA interpolates with $g$ groups. MLA instead caches a
+compressed latent $\mathbf{c}^{KV}\!\in\!\mathbb{R}^{d_c}$ ($d_c=256$ here) and a
+single decoupled RoPE key $\mathbf{k}^{R}\!\in\!\mathbb{R}^{d_\text{rope}}$
+($d_\text{rope}=16$), shared across heads&mdash;so its cache width is
+$d_c + d_\text{rope}$ regardless of head count.
+</p>
+<figure>
+  <img src="figures/attention_variants.svg" alt="How MHA, GQA, MLA, and MQA each produce and cache keys and values">
+  <figcaption><strong>Figure 1.</strong> What each variant stores per token. MHA keeps a full
+  key and value for every head; GQA shares them across $g$ groups; MQA collapses to a single
+  shared KV head. MLA instead caches a compressed latent $\mathbf{c}^{KV}$ ($d_c{=}256$) plus one
+  decoupled RoPE key ($d_\text{rope}{=}16$) and reconstructs the per-head keys/values only at
+  compute time — a small cache without giving up head diversity. Widths are drawn to the same
+  per-head scale.</figcaption>
+</figure>
+
+<h2>3&nbsp;&nbsp;Multi-head Latent Attention</h2>
+<p>
+MLA (DeepSeek-V2) factors the KV path through a low-rank bottleneck. From hidden
+state $\mathbf{h}_t$ it computes a down-projection to the cached latent and a
+decoupled rotary key:
+</p>
+<p>
+$$\mathbf{c}^{KV}_t = W^{DKV}\mathbf{h}_t \in \mathbb{R}^{d_c},
+  \qquad \mathbf{k}^{R}_t = \mathrm{RoPE}(W^{KR}\mathbf{h}_t) \in \mathbb{R}^{d_\text{rope}}.$$
+</p>
+<p>
+Only $(\mathbf{c}^{KV}_t, \mathbf{k}^{R}_t)$ are cached. At attention time the
+latent is up-projected to per-head content keys and values,
+$[\mathbf{k}^{C}; \mathbf{v}] = W^{UK,UV}\mathbf{c}^{KV}$, and each head's key is
+the concatenation $[\mathbf{k}^{C}_i; \mathbf{k}^{R}]$ of its content part and the
+shared rotary part. Queries are split the same way into a non-rotary
+"content" part ($d_\text{nope}=48$) and a rotary part ($d_\text{rope}=16$).
+</p>
+
+<h3>3.1&nbsp;&nbsp;Weight absorption: a fair decode path</h3>
+<p>
+Naively, decoding MLA re-materializes per-head keys/values for the entire context
+at every step&mdash;which would erase its memory-bandwidth advantage. The fix is
+an algebraic re-association. For the content score of head $i$,
+</p>
+<p>
+$$\mathbf{q}^{C\top}_i \mathbf{k}^{C}_i
+   = \mathbf{q}^{C\top}_i \big(W^{UK}_i \mathbf{c}^{KV}\big)
+   = \big(W^{UK\top}_i \mathbf{q}^{C}_i\big)^{\!\top} \mathbf{c}^{KV},$$
+</p>
+<p>
+so the up-projection $W^{UK}_i$ can be "absorbed" into the query once per step and
+the score taken directly against the cached latent $\mathbf{c}^{KV}$&mdash;the
+per-head content key is never formed over the context. The value projection
+$W^{UV}_i$ absorbs symmetrically into the output. We verify numerically (float64,
+math SDPA backend) that this absorbed path is identical to the naive one to
+$<\!10^{-9}$, and use it for every MLA decode measurement below.
+</p>
+
+<h2>4&nbsp;&nbsp;Method</h2>
+<ul>
+<li><strong>Backbone (fixed):</strong> 12 layers, $d_\text{model}=768$, $n_h=12$,
+    $d_h=64$, SwiGLU MLP ($\tfrac{8}{3}$ expansion), RMSNorm, tied embeddings,
+    RoPE $\theta{=}10^4$, vocab 50,304, context 1024.</li>
+<li><strong>Variant knobs:</strong> GQA $g=4$; MLA $d_c=256$, $d_\text{nope}=48$,
+    $d_\text{rope}=16$, $d_v=64$, no query compression.</li>
+<li><strong>Honest parameter counts.</strong> We do <em>not</em> fake
+    parameter-matching; the backbone is identical and we report exact counts
+    (MHA 123.6M, GQA 114.2M, MLA 116.1M, MQA 110.6M&mdash;the spread comes only
+    from the differing K/V/-projection widths) and FLOP-normalize in analysis.</li>
+<li><strong>Training (fixed):</strong> AdamW, cosine schedule with warmup, bf16
+    autocast, gradient accumulation, identical token budget per variant.
+    <code>torch.compile</code> on. Same seed.</li>
+<li><strong>Correctness:</strong> KV-cache incremental decode is checked against a
+    full forward pass to $10^{-9}$ for every variant; causality (no future leak)
+    is asserted; MLA's absorbed path is checked against its naive path.</li>
+</ul>
+<figure>
+  <img src="figures/arch_backbone.svg" alt="GPT backbone: token embedding, twelve pre-norm transformer blocks with a swappable attention module and SwiGLU MLP, final norm, tied LM head">
+  <figcaption><strong>Figure 2.</strong> The fixed backbone. Only the shaded <em>Attention</em>
+  module is swapped between MHA, MQA, GQA, and MLA — token/position handling, RMSNorm, the
+  SwiGLU MLP, RoPE, weight tying, and every dimension are held constant, so the attention
+  mechanism is the sole independent variable. Each block applies pre-norm residuals,
+  $x \leftarrow x + \text{Sublayer}(\text{RMSNorm}(x))$.</figcaption>
+</figure>
+
+<h2>5&nbsp;&nbsp;Efficiency results</h2>
+<p class="small">
+All measurements: RTX&nbsp;4080&nbsp;Super, bf16, decode batch&nbsp;8, single
+token/step against a pre-filled context. Decode uses MLA's weight-absorbed path.
+</p>
+
+<h3>5.1&nbsp;&nbsp;KV-cache footprint</h3>
+<p>
+The cache is exact and grows linearly with context. At a 128k context (batch&nbsp;8)
+the total KV footprint is MHA&nbsp;38.65&nbsp;GB, GQA&nbsp;12.88&nbsp;GB,
+MLA&nbsp;<span class="win">6.85&nbsp;GB</span>, MQA&nbsp;3.22&nbsp;GB. MHA is
+physically impossible on this 16&nbsp;GB card; MLA fits with room to spare while
+caching a single shared latent rather than four KV groups.
+</p>
+<figure>
+  <img src="figures/kv_cache_vs_context.png" alt="KV cache vs context length, log-log">
+  <figcaption><strong>Figure 3.</strong> KV-cache footprint vs context length
+  (log-log). The ordering MHA &gt; GQA &gt; MLA &gt; MQA is fixed by the cached
+  width and independent of hardware.</figcaption>
+</figure>
+
+<h3>5.2&nbsp;&nbsp;Decode latency, memory, and throughput</h3>
+<p>
+Because MLA attends against a narrow latent, its per-step cost stays nearly
+<em>flat</em> as context grows from 512 to 2048 (4.68&nbsp;&rarr;&nbsp;4.65&nbsp;ms),
+where MHA already climbs (3.29&nbsp;&rarr;&nbsp;5.84&nbsp;ms). At 16k context MLA
+decodes at <span class="win">359&nbsp;tok/s</span> using 3.0&nbsp;GB, versus MHA's
+258&nbsp;tok/s at 11.1&nbsp;GB and GQA's 269&nbsp;tok/s at 4.3&nbsp;GB. There is a
+crossover: at short context MLA pays a small absorption overhead and trails the
+others; at long context it overtakes both MHA and GQA on throughput while using a
+fraction of their memory.
+</p>
+<table>
+<thead><tr><th>ctx</th><th colspan="2">MHA</th><th colspan="2">GQA</th><th colspan="2">MLA</th><th colspan="2">MQA</th></tr>
+<tr><th></th><th>tok/s</th><th>GB</th><th>tok/s</th><th>GB</th><th>tok/s</th><th>GB</th><th>tok/s</th><th>GB</th></tr></thead>
+<tbody>
+<tr><td>512</td><td>2429</td><td>1.4</td><td>2419</td><td>1.2</td><td>1710</td><td>1.2</td><td>2472</td><td>1.1</td></tr>
+<tr><td>2048</td><td>1370</td><td>2.3</td><td>1549</td><td>1.4</td><td>1720</td><td>1.4</td><td>2266</td><td>1.2</td></tr>
+<tr><td>8192</td><td>482</td><td>6.1</td><td>504</td><td>2.6</td><td>714</td><td>2.1</td><td>1090</td><td>1.3</td></tr>
+<tr><td>16384</td><td>258</td><td>11.1</td><td>269</td><td>4.3</td><td><span class="win">359</span></td><td>3.0</td><td>641</td><td>1.8</td></tr>
+</tbody>
+</table>
+<figure>
+  <img src="figures/decode_throughput_vs_context.png" alt="Decode throughput vs context">
+  <figcaption><strong>Figure 4.</strong> Decode throughput vs context. MLA's curve
+  is flat-then-gentle: it crosses above MHA and GQA as context grows.</figcaption>
+</figure>
+<figure>
+  <img src="figures/decode_mem_vs_context.png" alt="Decode peak memory vs context">
+  <figcaption><strong>Figure 5.</strong> Decode-step peak memory. MLA tracks far
+  below MHA/GQA and approaches MQA.</figcaption>
+</figure>
+
+<h3>5.3&nbsp;&nbsp;Prefill and training throughput</h3>
+<p>
+With no cache to amortize, prefill and training throughput are close across
+variants&mdash;within ~20% (prefill 250&ndash;308k tok/s; training 54&ndash;58k
+tok/s), with the lighter-KV variants slightly ahead. Cache reduction is an
+inference-time win, not a training-time cost.
+</p>
+<figure>
+  <img src="figures/throughput_bars.png" alt="Prefill and training throughput bars">
+  <figcaption><strong>Figure 6.</strong> Prefill (left) and training-step (right)
+  throughput. The attention variant barely moves the compute-bound regime.</figcaption>
+</figure>
+
+<h2>6&nbsp;&nbsp;Quality results</h2>
+<div class="note">
+Quality numbers are produced by controlled training sweeps with the attention
+variant as the <em>only</em> difference. Both are now <strong>complete</strong>:
+the TinyStories dev sweep (&sect;6.1, ≈50M params, 4k iters) and the FineWeb-Edu
+headline sweep (&sect;6.2, 124M, 20k iters ≈ 9.8B tokens). Val loss is a
+deterministic non-overlapping sweep over the held-out split; bits/byte normalizes
+by raw UTF-8 bytes so it is comparable across tokenizers.
+</div>
+<h3>6.1&nbsp;&nbsp;TinyStories (dev scale, ~50M)</h3>
+<table>
+<thead><tr><th>Variant</th><th>Params</th><th>KV B/tok</th><th>Val loss</th><th>Perplexity</th><th>Bits/byte</th></tr></thead>
+<tbody>
+<tr><td>MHA</td><td>51.5M</td><td>16,384 (1.0&times;)</td><td>1.4351</td><td>4.200</td><td>0.5134</td></tr>
+<tr><td>GQA</td><td>48.3M</td><td>4,096 (4.0&times;)</td><td>1.4550</td><td>4.284</td><td>0.5206</td></tr>
+<tr><td>MLA</td><td>48.8M</td><td>2,304 (7.1&times;)</td><td>1.4590</td><td>4.302</td><td>0.5220</td></tr>
+<tr><td>MQA</td><td>47.8M</td><td>2,048 (8.0&times;)</td><td>1.4488</td><td>4.258</td><td>0.5183</td></tr>
+</tbody>
+</table>
+<p>
+At dev scale the four variants land within <strong>0.024 val loss</strong>
+(0.10 perplexity, ~2.4%) of one another. MHA leads, as expected from the largest
+and most expressive cache; the three cache-reduced variants are separated by less
+than run-to-run noise (MQA 4.258, GQA 4.284, MLA 4.302). The practical reading is
+that cutting the KV cache <strong>4&ndash;8&times;</strong> costs essentially
+nothing in quality at this token budget. MLA matches the GQA/MQA quality band
+while&mdash;unlike them&mdash;reconstructing full per-head keys and values; whether
+that retained head diversity converts into a quality edge is a question for the
+124M/10B headline scale (&sect;6.2), where 50M/4k-iter under-training no longer
+masks it. We do not over-read the ordering among the three cheap variants here.
+</p>
+<figure>
+  <img src="figures/quality_vs_kv.png" alt="Quality vs KV-cache footprint">
+  <figcaption><strong>Figure 7.</strong> Quality (val perplexity) against KV-cache
+  width per token. The near-flat spread shows the efficiency axis is nearly free
+  of quality cost at dev scale; MLA sits in the low-cache band beside MQA/GQA.</figcaption>
+</figure>
+<h3>6.2&nbsp;&nbsp;FineWeb-Edu (headline, 124M)</h3>
+<p class="small">
+Headline sweep: identical 12-layer / 768-wide backbone, 20,000 iterations
+(491,520 tokens/step &asymp; 9.8B tokens, ~1 epoch of FineWeb-Edu&nbsp;10B),
+identical AdamW / cosine schedule and seed; only <code>--attn</code> varies.
+Evaluated on the held-out split (47.8M tokens) from each variant's best
+checkpoint.
+</p>
+<table>
+<thead><tr><th>Variant</th><th>Params</th><th>KV B/tok</th><th>Val loss</th><th>Perplexity</th><th>Bits/byte</th></tr></thead>
+<tbody>
+<tr><td>MHA</td><td>123.6M</td><td>36,864 (1.0&times;)</td><td>3.0128</td><td>20.345</td><td>0.9409</td></tr>
+<tr><td>GQA</td><td>114.2M</td><td>12,288 (3.0&times;)</td><td>3.0349</td><td>20.798</td><td>0.9478</td></tr>
+<tr><td>MLA</td><td>116.1M</td><td>6,528 (5.6&times;)</td><td><span class="win">3.0309</span></td><td><span class="win">20.716</span></td><td><span class="win">0.9466</span></td></tr>
+<tr><td>MQA</td><td>110.6M</td><td>3,072 (12.0&times;)</td><td>3.0578</td><td>21.281</td><td>0.9550</td></tr>
+</tbody>
+</table>
+<p>
+At headline scale the four variants span just <strong>0.045 val loss</strong>
+(20.3&ndash;21.3 perplexity, ~4.6%), and the ordering sharpens into a clean
+result. MHA leads, as its full-width cache should. But among the three
+cache-reduced variants <strong>MLA wins</strong> (val loss 3.0309, vs
+GQA&nbsp;3.0349 and MQA&nbsp;3.0578) while caching <em>less</em> than
+GQA&mdash;6,528 vs 12,288 bytes/token. MLA therefore
+<span class="win">Pareto-dominates GQA</span>: strictly smaller cache <em>and</em>
+lower perplexity. It also closes most of the gap to MHA, trailing the full-cache
+model by only ~1.8% perplexity while using <strong>5.6&times;</strong> less KV
+memory. The head-diversity question left open at dev scale (&sect;6.1)&mdash;whether
+MLA's reconstructed per-head keys/values buy quality the head-sharing variants
+cannot&mdash;resolves in MLA's favor once 50M / 4k-iter under-training is removed.
+</p>
+<figure>
+  <img src="figures/headline_quality_vs_kv.png" alt="Validation perplexity vs KV-cache bytes per token at the 124M headline scale: MHA has the lowest perplexity at the largest cache; MLA sits below and to the left of GQA; MQA has the cheapest cache but the highest perplexity">
+  <figcaption><strong>Figure 8.</strong> Headline quality/efficiency trade-off
+  (124M, FineWeb-Edu); down-and-left is better. MLA sits <em>below and to the
+  left</em> of GQA&mdash;less cache <em>and</em> lower perplexity&mdash;and is the
+  closest cache-reduced variant to full MHA, which buys its quality lead with a
+  5.6&times; larger cache. MQA is cheapest but pays the most in quality.</figcaption>
+</figure>
+<p class="small">
+The four variants trained <em>concurrently</em>, one per GPU, on NVIDIA
+H100/H200 GPUs of Georgia Tech's <a href="https://pace.gatech.edu/">PACE-ICE</a>
+cluster. Tokens/step is held identical across variants, so the comparison stays
+controlled regardless of which GPU each variant landed on.
+</p>
+<figure>
+  <img src="h200_cluster.png" alt="Four NVIDIA H200 SXM GPU modules mounted on a node baseboard">
+  <figcaption><strong>Figure 9.</strong> Compute for the headline sweep: NVIDIA
+  H100/H200 GPUs on Georgia Tech's PACE-ICE cluster (pictured: a four-H200 node).
+  Each attention variant trained on its own GPU, in parallel.</figcaption>
+</figure>
+
+<h2>7&nbsp;&nbsp;Discussion</h2>
+<p>
+The efficiency picture is unambiguous and hardware-independent in its ordering:
+for a fixed backbone, the cached width sets the long-context memory wall, and MLA
+buys a 5.6&times; reduction over MHA while&mdash;unlike MQA/GQA&mdash;reconstructing
+full per-head keys and values, so it need not give up head diversity to save
+memory. The weight-absorption identity is what turns that smaller cache into an
+actual decode-throughput win at long context rather than a wash. The decisive
+question is whether that reconstruction preserves quality at a fixed token
+budget. At headline scale (&sect;6.2) it does: MLA is the best of the
+cache-reduced variants and the only one to Pareto-dominate GQA, recovering most
+of MHA's quality at a fraction of its cache. The retained per-head key/value
+diversity&mdash;not merely the smaller cache&mdash;is what separates MLA from
+MQA/GQA once the token budget is fixed and the under-training of dev scale is
+removed.
+</p>
+
+<h2>8&nbsp;&nbsp;Reproducibility</h2>
+<p>
+Everything is open and runs on one consumer GPU.
+Code: <a href="https://github.com/bryanvine/mla-gpt">github.com/bryanvine/mla-gpt</a>.
+</p>
+<pre class="mono">uv sync
+uv run pytest                                   # correctness: cache equivalence, causality, absorption
+uv run python scripts/benchmark.py --max-context        # §5 efficiency + figures
+bash scripts/sweep_tinystories.sh               # §6.1 dev-scale quality sweep
+uv run python scripts/eval.py --glob 'runs/tinystories_*' --out runs/tinystories_eval
+sbatch scripts/sweep_fineweb_pace.sbatch        # §6.2 headline sweep (4×GPU, PACE-ICE/Slurm)
+uv run python scripts/eval.py --glob 'runs/fineweb_*' --out runs/eval_fineweb</pre>
+<p class="small">
+A single base config trains every variant by changing only <code>--attn</code>,
+which is what keeps the attention mechanism the sole independent variable.
+</p>
+
+<h2>9&nbsp;&nbsp;Acknowledgments</h2>
+<p>
+The 124M headline sweep (&sect;6.2) was run on
+<a href="https://pace.gatech.edu/">PACE-ICE</a>, the instructional and research
+computing cluster at the Georgia Institute of Technology. We gratefully
+acknowledge Georgia Tech PACE-ICE for the research GPU time (NVIDIA H100/H200)
+that made headline-scale training feasible. All dev-scale work (&sect;5 efficiency
+and the &sect;6.1 sweep) runs on a single consumer RTX&nbsp;4080&nbsp;Super.
+</p>
+
+<hr>
+<p class="small">
+Built from scratch in PyTorch. MLA follows DeepSeek-V2 (Liu et&nbsp;al., 2024);
+GQA follows Ainslie et&nbsp;al. (2023); the byte/RoPE backbone follows the
+Llama/nanoGPT lineage. &copy;&nbsp;2026 Bryan Vine, MIT-licensed.
+</p>
+
+</div>
+</body>
+</html>

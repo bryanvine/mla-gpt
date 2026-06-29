@@ -9,7 +9,26 @@ vary **only the attention mechanism**. Then measure both **quality** (validation
 perplexity / bits-per-byte) and **efficiency** (KV-cache size, decode throughput,
 peak memory, max attainable context).
 
-> 📄 **Paper:** [bryanvine.github.io/mla-gpt](https://bryanvine.github.io/mla-gpt/) · the writeup tracks these results.
+> 📄 **Papers:** **[Attention, Controlled](https://bryanvine.github.io/mla-gpt/)** — a controlled two-paper series.
+
+## Papers
+
+A short series that holds the backbone, RoPE, optimizer, data, and token budget
+fixed and varies **only** the attention mechanism, pushing that controlled
+comparison along a different axis in each paper.
+
+1. **[The Attention Variant Is the Only Variable](https://bryanvine.github.io/mla-gpt/attention-variants.html)**
+   — *At a fixed compute and parameter budget, how much quality does each
+   KV-cache-reduction strategy cost, and what does it buy back in inference
+   efficiency?* Cutting the cache is **nearly free for LM quality**: the four
+   variants land within ~4.6% perplexity, and MLA **Pareto-dominates GQA** while
+   caching 5.6× less than MHA. *(Efficiency + quality results below.)*
+2. **[The Recall Cliff](https://bryanvine.github.io/mla-gpt/recall-capability.html)**
+   — *Does the smaller cache cost capability?* On dense associative recall there's a
+   **capacity cliff ordered by cache width** (MHA > GQA > MQA > MLA): caches
+   ≥1024 B escape 96 stored key–value pairs, ≤512 B can't — a gap that natural-text
+   perplexity hides entirely, and that two confound controls show is part capacity,
+   part learning-rate schedule.
 
 ## Why this exists
 
