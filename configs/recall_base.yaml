@@ -1,0 +1,47 @@
+# Paper #3 (recall capacity) — synthetic multi-query associative recall (MQAR).
+# Small backbone so attention *capacity* is the binding constraint; train all four
+# variants by changing only --attn. block_size leaves headroom above the training
+# sequence length so the same checkpoint can be evaluated train-short / test-long.
+# Difficulty is swept from the CLI, e.g. --set train.task_params.num_pairs=128.
+model:
+  attn_type: mha          # overridden by --attn
+  vocab_size: 512         # symbol alphabet for keys/values
+  block_size: 1024        # >> train seq len, for extrapolation eval
+  n_layer: 4
+  n_head: 8
+  d_model: 256            # head_dim = 32
+  mlp_hidden_mult: 2.6667
+  dropout: 0.0
+  tie_embeddings: true
+  rope_theta: 10000.0
+  # variant-specific (used only by the matching attn_type)
+  n_kv_head: 2            # GQA: 8 heads -> 2 groups
+  kv_lora_rank: 32        # MLA latent (small on purpose; also the Paper-#4 ablation axis)
+  q_lora_rank: 0
+  qk_nope_head_dim: 24
+  qk_rope_head_dim: 8     # 24 + 8 = 32 = head_dim
+  v_head_dim: 32
+
+train:
+  data_dir: ""            # unused: synthetic task generates batches on the fly
+  batch_size: 64
+  grad_accum: 1
+  max_iters: 4000
+  warmup_iters: 100
+  lr: 1.0e-3
+  min_lr: 1.0e-4
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 250
+  eval_iters: 40
+  log_interval: 50
+  seed: 1337
+  dtype: bfloat16
+  compile: true
+  task: mqar
+  task_params:
+    num_pairs: 64         # associations to store (difficulty axis)
+    num_queries: 16       # queries per sequence (the "multi-query" stress)
+    num_symbols: 512      # <= vocab_size

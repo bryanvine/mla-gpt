@@ -31,6 +31,11 @@ class TrainConfig:
     batch_size: int = 32
     grad_accum: int = 4
     max_iters: int = 5000
+    # cosine LR decay horizon. 0 -> use max_iters (coupled, the default). Set independently
+    # (e.g. > max_iters) to decouple the LR *shape* from the *stop* iter -- used by the
+    # Paper #3 confound control: 60k iters under the 120k schedule shape, to separate the
+    # "gentler LR decay" effect from the "more iters" effect when a longer cap lets a cell grok.
+    lr_decay_iters: int = 0
     warmup_iters: int = 200
     lr: float = 6e-4
     min_lr: float = 6e-5
@@ -43,12 +48,20 @@ class TrainConfig:
     eval_iters: int = 100
     log_interval: int = 10
     always_save_checkpoint: bool = False
+    # when >0, stop as soon as val_loss < this threshold. Turns a fixed-budget run
+    # into an iters-to-grok measurement: synthetic recall tasks sit on a high plateau
+    # then transition sharply, so the crossing iter is the sample-efficiency metric.
+    early_stop_val: float = 0.0
     # system
     seed: int = 1337
     device: str = "cuda"
     dtype: str = "bfloat16"
     compile: bool = True
     resume: bool = True     # auto-continue from out_dir/ckpt.pt if present
+    # data source: "lm" trains on the .bin corpus; "mqar"/"copy" train on a
+    # synthetic generator from synthetic.py (the Paper #3 capacity probes).
+    task: str = "lm"
+    task_params: dict = field(default_factory=dict)
 
     @property
     def tokens_per_iter(self) -> int:
@@ -56,11 +69,12 @@ class TrainConfig:
 
 
 def _lr_at(it: int, c: TrainConfig) -> float:
+    horizon = c.lr_decay_iters if c.lr_decay_iters > 0 else c.max_iters
     if it < c.warmup_iters:
         return c.lr * (it + 1) / (c.warmup_iters + 1)
-    if it > c.max_iters:
+    if it > horizon:
         return c.min_lr
-    ratio = (it - c.warmup_iters) / max(1, c.max_iters - c.warmup_iters)
+    ratio = (it - c.warmup_iters) / max(1, horizon - c.warmup_iters)
     coeff = 0.5 * (1.0 + math.cos(math.pi * ratio))
     return c.min_lr + coeff * (c.lr - c.min_lr)
 
@@ -94,8 +108,15 @@ def run_training(model_cfg: GPTConfig, tc: TrainConfig) -> dict:
     ctx = nullcontext() if device_type == "cpu" else torch.autocast(device_type=device_type, dtype=ptdtype)
 
     block_size = model_cfg.block_size
-    get_batch = make_get_batch(tc.data_dir, block_size, tc.device)
-    tokens_per_iter = tc.batch_size * tc.grad_accum * block_size
+    if tc.task == "lm":
+        get_batch = make_get_batch(tc.data_dir, block_size, tc.device)
+        seq_len = block_size
+    else:
+        from .synthetic import make_synthetic_get_batch, sequence_len
+        get_batch = make_synthetic_get_batch(tc.task, block_size, model_cfg.vocab_size,
+                                             tc.device, seed=tc.seed, **tc.task_params)
+        seq_len = sequence_len(tc.task, **tc.task_params)
+    tokens_per_iter = tc.batch_size * tc.grad_accum * seq_len
 
     model = GPT(model_cfg).to(tc.device)
     raw_model = model
@@ -145,6 +166,8 @@ def run_training(model_cfg: GPTConfig, tc: TrainConfig) -> dict:
     t0 = time.time()  # session start; on resume, metrics time_s/tok_per_s are per-session
     x, y = get_batch("train", tc.batch_size)
     running = None
+    stop_iter = tc.max_iters    # actual last iter; early-stop overwrites with the grok iter
+    groked = False
     for it in range(start_iter, tc.max_iters + 1):
         lr = _lr_at(it, tc)
         for g in optimizer.param_groups:
@@ -170,6 +193,10 @@ def run_training(model_cfg: GPTConfig, tc: TrainConfig) -> dict:
                         "cpu_rng": torch.get_rng_state(),
                         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                         "model_cfg": model_cfg.to_dict()}, ckpt_path)
+            if tc.early_stop_val > 0 and losses["val"] < tc.early_stop_val:
+                groked, stop_iter = True, it
+                print(f"[grok] val {losses['val']:.4f} < {tc.early_stop_val:g} at iter {it}; early stop", flush=True)
+                break
 
         if it == tc.max_iters:
             break
@@ -196,8 +223,10 @@ def run_training(model_cfg: GPTConfig, tc: TrainConfig) -> dict:
     total_time = time.time() - t0
     summary = {"attn_type": model_cfg.attn_type, "best_val_loss": best_val,
                "params": raw_model.num_params(), "kv_bytes_per_token": raw_model.kv_bytes_per_token(),
-               "total_time_s": total_time, "final_iter": tc.max_iters,
-               "tokens_seen": tc.max_iters * tokens_per_iter}
+               "total_time_s": total_time, "final_iter": stop_iter,
+               "groked": groked, "early_stop_val": tc.early_stop_val,
+               "iters_to_grok": stop_iter if groked else None,
+               "tokens_seen": stop_iter * tokens_per_iter}
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"[done] best val {best_val:.4f} in {total_time/60:.1f} min -> {out_dir}")
     return summary

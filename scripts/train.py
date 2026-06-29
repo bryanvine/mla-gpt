@@ -39,8 +39,11 @@ def _coerce(v: str):
 def _apply_overrides(cfg: dict, overrides: list[str]) -> None:
     for ov in overrides:
         key, val = ov.split("=", 1)
-        section, field = key.split(".", 1)
-        cfg.setdefault(section, {})[field] = _coerce(val)
+        parts = key.split(".")
+        d = cfg
+        for p in parts[:-1]:                 # walk/create nested dicts
+            d = d.setdefault(p, {})
+        d[parts[-1]] = _coerce(val)          # e.g. train.task_params.num_pairs=128
 
 
 def _filter(d: dict, dc_type) -> dict:
@@ -69,7 +72,9 @@ def main() -> None:
 
     attn = cfg["model"].get("attn_type", "mha")
     name = args.name or f"{Path(args.config).stem}_{attn}"
-    cfg["train"]["out_dir"] = f"runs/{name}"
+    # RUNS_DIR lets a sweep write to non-synced scratch (e.g. /tmp) instead of the
+    # OneDrive-synced repo; defaults to "runs" so single runs are unaffected.
+    cfg["train"]["out_dir"] = f"{os.environ.get('RUNS_DIR', 'runs')}/{name}"
 
     model_cfg = GPTConfig(**_filter(cfg["model"], GPTConfig))
     train_cfg = TrainConfig(**_filter(cfg["train"], TrainConfig))

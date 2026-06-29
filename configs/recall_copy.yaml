@@ -1,0 +1,44 @@
+# Paper #3 (recall capacity) — selective-copy task (breadth: a second capability
+# that stresses how much the KV cache can carry). Backbone is IDENTICAL to
+# recall_base.yaml so the only differences across the study remain --attn and the
+# task. Difficulty swept via --set train.task_params.num_tokens=64.
+model:
+  attn_type: mha          # overridden by --attn
+  vocab_size: 512
+  block_size: 1024
+  n_layer: 4
+  n_head: 8
+  d_model: 256            # head_dim = 32
+  mlp_hidden_mult: 2.6667
+  dropout: 0.0
+  tie_embeddings: true
+  rope_theta: 10000.0
+  n_kv_head: 2
+  kv_lora_rank: 32
+  q_lora_rank: 0
+  qk_nope_head_dim: 24
+  qk_rope_head_dim: 8
+  v_head_dim: 32
+
+train:
+  data_dir: ""
+  batch_size: 64
+  grad_accum: 1
+  max_iters: 4000
+  warmup_iters: 100
+  lr: 1.0e-3
+  min_lr: 1.0e-4
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 250
+  eval_iters: 40
+  log_interval: 50
+  seed: 1337
+  dtype: bfloat16
+  compile: true
+  task: copy
+  task_params:
+    num_tokens: 32        # sequence length to copy (difficulty axis)
+    num_symbols: 256      # content alphabet; separator id = num_symbols (< vocab_size)
